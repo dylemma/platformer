@@ -84,6 +84,14 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
     }
     .spawn(&mut commands);
 
+    // platform
+    WallArgs {
+        color: Color::srgb(0.15, 0.8, 0.25),
+        pos: Vec2::new(75.0, 20.0),
+        size: Vec2::new(20.0, 2.0),
+    }
+    .spawn(&mut commands);
+
     // west wall
     WallArgs {
         color: Color::srgb(0.15, 0.5, 0.15),
@@ -109,6 +117,8 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
     .spawn(&mut commands);
 
     // a ball to bounce around
+    // TODO: why does the kinematic character controller seem to get "stuck" on the ball
+    //       when attempting to start pushing it from stationary?
     commands.spawn((
         RigidBody::Dynamic,
         Sprite {
@@ -122,24 +132,32 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
         GravityScale(1.0),
         Velocity::linear(Vec2::new(200.0, 200.0)),
         Ccd::enabled(),
-        // Velocity::zero(),
     ));
 }
 
-#[derive(Component, Default)]
+#[derive(Component)]
 struct Player {
     max_run_speed: f32,
     run_acceleration: f32,
     run_deceleration: f32,
-    current_run_speed: f32,
-    grounded: bool,
     jump_speed: f32,
     gravity: f32,
-    current_fall_speed: f32, // TODO: naming is kinda backwards because positive means "going up"
+    coyote_time_frames: u32,
+    jump_buffer_frames: u32,
     // air_max_speed: f32,
     // air_acceleration: f32,
     // air_deceleration: f32,
     // current_air_speed: f32,
+}
+
+#[derive(Component, Default)]
+struct PlayerControlState {
+    grounded: bool,
+    current_run_speed: f32,
+    current_fall_speed: f32, // TODO: naming is kinda backwards because positive means "going up"
+    frames_since_grounded: u32,
+    frames_since_jump_input: u32,
+    has_jumped: bool,
 }
 
 #[derive(Component)]
@@ -153,15 +171,15 @@ fn setup_player(mut commands: Commands) {
             run_acceleration: 6.0,
             // decelerate from max speed to 0 in 1/10 second (6 frames)
             run_deceleration: 15.0,
-            current_run_speed: 0.0,
-            grounded: false,
             jump_speed: 150.0,
             gravity: -10.0,
-            current_fall_speed: 0.0,
+            coyote_time_frames: 6,
+            jump_buffer_frames: 6,
             // air_max_speed: 25.0,
             // air_acceleration: 5.0,
             // air_deceleration:
         },
+        PlayerControlState::default(),
         Friction {
             coefficient: 0.0,
             combine_rule: CoefficientCombineRule::Multiply,
@@ -190,7 +208,8 @@ fn setup_player(mut commands: Commands) {
 fn player_system(
     kb: Res<ButtonInput<KeyCode>>,
     mut player_query: Query<(
-        &mut Player,
+        &Player,
+        &mut PlayerControlState,
         &mut KinematicCharacterController,
         &KinematicCharacterControllerOutput,
     )>,
@@ -218,46 +237,77 @@ fn player_system(
 
     let jump_requested = kb.just_pressed(KeyCode::Space);
 
-    for (mut player, mut controller, last_controller_out) in &mut player_query {
-        // player has a current X velocity
-        // input dictates a desired velocity at max speed
-        // derive an acceleration to push the player towards that desired velocity
+    for (player_params, mut player, mut controller, last_controller_out) in &mut player_query {
 
+        // TODO: arrest vertical momentum when hitting ceilings
         for collision in &last_controller_out.collisions {
             info!("player hit {:?} with {:?} left", collision.entity, collision.translation_remaining);
         }
 
         player.current_run_speed = compute_run_velocity(
             /* current */ player.current_run_speed,
-            /* desired */ input_axis.x * player.max_run_speed,
-            /* accel  */ player.run_acceleration,
-            /* decel  */ player.run_deceleration,
+            /* desired */ input_axis.x * player_params.max_run_speed,
+            /* accel  */ player_params.run_acceleration,
+            /* decel  */ player_params.run_deceleration,
         );
 
-        if !last_controller_out.grounded {
-            player.current_fall_speed += player.gravity;
+        player.grounded = last_controller_out.grounded;
+
+        // refund jump ability when reaching the ground
+        if player.grounded {
+            player.has_jumped = false;
         }
 
-        if last_controller_out.grounded {
-            if jump_requested {
-                player.current_fall_speed = player.jump_speed;
-            } else {
-                player.current_fall_speed = 0.0;
-            }
+        // coyote timer
+        if player.grounded {
+            player.frames_since_grounded = 0;
+        } else {
+            player.frames_since_grounded = player.frames_since_grounded.saturating_add(1);
+        }
+        let can_jump = player.frames_since_grounded <= player_params.coyote_time_frames;
+
+        // jump-buffering
+        if jump_requested {
+            player.frames_since_jump_input = 0;
+        } else {
+            player.frames_since_jump_input = player.frames_since_jump_input.saturating_add(1);
+        }
+        let wants_to_jump = player.frames_since_jump_input <= player_params.jump_buffer_frames;
+
+        // apply gravity
+        if player.grounded {
+            player.current_fall_speed = 0.0;
+        } else {
+            player.current_fall_speed += player_params.gravity;
         }
 
-        // info!("player speed: {}", player.current_fall_speed);
+        // jump
+        if can_jump && wants_to_jump && !player.has_jumped {
+            info!("jumping with coyote time {}", player.frames_since_grounded);
+            player.current_fall_speed = player_params.jump_speed;
+            player.has_jumped = true;
+        }
 
-        status_text.0 = format!("vx: {}, vy: {}", player.current_run_speed, player.current_fall_speed);
+        // finish velocity computation
+        let player_velocity_per_sec =
+            Vec2::new(player.current_run_speed, player.current_fall_speed);
 
-        controller.translation = Some(Vec2::new(
-            player.current_run_speed * time.delta_secs(),
-            player.current_fall_speed * time.delta_secs(),
-        ));
+        // debug text for velocity
+        status_text.0 = format!(
+            "vx: {}, vy: {}\ngrounded: {}\njumping: {}",
+            player_velocity_per_sec.x,
+            player_velocity_per_sec.y,
+            player.grounded,
+            player.has_jumped
+        );
+
+        // send computed translation to controller for resolution in the physics world
+        controller.translation = Some(player_velocity_per_sec * time.delta_secs());
     }
-
 }
 
+/// Solve for a player's new horizontal velocity, by accelerating or decelerating
+/// their current velocity towards their desired velocity
 fn compute_run_velocity(
     current_vel: f32,
     desired_vel: f32,
