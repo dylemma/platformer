@@ -52,6 +52,9 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
+#[derive(Component)]
+struct Platform;
+
 struct WallArgs {
     color: Color,
     pos: Vec2,
@@ -61,6 +64,7 @@ impl WallArgs {
     fn spawn(self, commands: &mut Commands) {
         let WallArgs { color, pos, size } = self;
         commands.spawn((
+            Platform,
             RigidBody::Fixed,
             Sprite::from_color(color, size),
             Collider::cuboid(size.x * 0.5, size.y * 0.5),
@@ -203,7 +207,10 @@ fn setup_player(mut commands: Commands) {
         Collider::cuboid(2.5, 2.5),
         Transform::from_xyz(25., 25., 0.),
         RigidBody::KinematicPositionBased,
-        KinematicCharacterController::default(),
+        KinematicCharacterController {
+            filter_flags: QueryFilterFlags::EXCLUDE_DYNAMIC,
+            ..default()
+        },
         KinematicCharacterControllerOutput::default(),
     ));
 
@@ -230,6 +237,7 @@ fn player_system(
         &KinematicCharacterControllerOutput,
     )>,
     mut status_text_query: Query<&mut Text, With<PlayerStatusText>>,
+    obstacles: Query<(), With<Platform>>,
     time: Res<Time>,
 ) {
     let mut status_text = status_text_query.single_mut();
@@ -254,12 +262,22 @@ fn player_system(
     let jump_requested = kb.just_pressed(KeyCode::Space);
 
     for (player_params, mut player, mut controller, last_controller_out) in &mut player_query {
-        // TODO: arrest vertical momentum when hitting ceilings
+        // if player ran into a platform, reset the portion of their velocity that caused that collision.
+        // e.g. bonk your head when you jump into the ceiling, or stop when you run into a wall
         for collision in &last_controller_out.collisions {
-            info!(
-                "player hit {:?} with {:?} left",
-                collision.entity, collision.translation_remaining
-            );
+            if let Ok(_) = obstacles.get(collision.entity) {
+                if let Some(hit) = collision.hit.details {
+                    let normal = hit.normal1;
+
+                    let prev_player_vel = Vec2::new(player.current_run_speed, player.current_fall_speed);
+                    let arrested_velocity = -prev_player_vel.dot(normal) * normal;
+
+                    info!("player hit platform with normal {:?} and should adjust velocity by {:?}", normal, arrested_velocity);
+                    player.current_run_speed += arrested_velocity.x;
+                    player.current_fall_speed += arrested_velocity.y;
+
+                }
+            }
         }
 
         player.current_run_speed = compute_run_velocity(
@@ -352,7 +370,10 @@ fn compute_run_velocity(
     // The player will have a separate "speed up" and "slow down" rate;
     // Pick the appropriate one based on the difference between current
     // and desired velocities.
-    let accel_base = if desired_vel == 0.0 {
+    let accel_base = if current_vel == 0.0 {
+        // anything is faster than 0, regardless of direction
+        acceleration
+    } else if desired_vel == 0.0 {
         // if the goal is to stop, that's always deceleration
         deceleration
     } else if desired_vel.signum() != current_vel.signum() {
