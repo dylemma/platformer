@@ -84,10 +84,18 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
     }
     .spawn(&mut commands);
 
-    // platform
+    // platform 1
     WallArgs {
         color: Color::srgb(0.15, 0.8, 0.25),
         pos: Vec2::new(75.0, 20.0),
+        size: Vec2::new(20.0, 2.0),
+    }
+    .spawn(&mut commands);
+
+    // platform 2
+    WallArgs {
+        color: Color::srgb(0.15, 0.8, 0.25),
+        pos: Vec2::new(50.0, 35.0),
         size: Vec2::new(20.0, 2.0),
     }
     .spawn(&mut commands);
@@ -144,6 +152,8 @@ struct Player {
     gravity: f32,
     coyote_time_frames: u32,
     jump_buffer_frames: u32,
+    max_jumps: u8,
+    jump_cooldown_frames: u8,
     // air_max_speed: f32,
     // air_acceleration: f32,
     // air_deceleration: f32,
@@ -153,11 +163,14 @@ struct Player {
 #[derive(Component, Default)]
 struct PlayerControlState {
     grounded: bool,
+    jumping: bool,
+    lost_jump_due_to_falling: bool,
     current_run_speed: f32,
     current_fall_speed: f32, // TODO: naming is kinda backwards because positive means "going up"
     frames_since_grounded: u32,
     frames_since_jump_input: u32,
-    has_jumped: bool,
+    jumps_remaining: u8,
+    frames_since_jumped: u8,
 }
 
 #[derive(Component)]
@@ -175,6 +188,8 @@ fn setup_player(mut commands: Commands) {
             gravity: -10.0,
             coyote_time_frames: 6,
             jump_buffer_frames: 6,
+            max_jumps: 2,
+            jump_cooldown_frames: 8,
             // air_max_speed: 25.0,
             // air_acceleration: 5.0,
             // air_deceleration:
@@ -238,10 +253,12 @@ fn player_system(
     let jump_requested = kb.just_pressed(KeyCode::Space);
 
     for (player_params, mut player, mut controller, last_controller_out) in &mut player_query {
-
         // TODO: arrest vertical momentum when hitting ceilings
         for collision in &last_controller_out.collisions {
-            info!("player hit {:?} with {:?} left", collision.entity, collision.translation_remaining);
+            info!(
+                "player hit {:?} with {:?} left",
+                collision.entity, collision.translation_remaining
+            );
         }
 
         player.current_run_speed = compute_run_velocity(
@@ -255,7 +272,9 @@ fn player_system(
 
         // refund jump ability when reaching the ground
         if player.grounded {
-            player.has_jumped = false;
+            player.jumps_remaining = player_params.max_jumps;
+            player.jumping = false;
+            player.lost_jump_due_to_falling = false;
         }
 
         // coyote timer
@@ -264,7 +283,14 @@ fn player_system(
         } else {
             player.frames_since_grounded = player.frames_since_grounded.saturating_add(1);
         }
-        let can_jump = player.frames_since_grounded <= player_params.coyote_time_frames;
+
+        // if player walks off a platform without jumping, then they lose a jump
+        if player.frames_since_grounded > player_params.coyote_time_frames {
+            if !player.lost_jump_due_to_falling && !player.jumping {
+                player.jumps_remaining = player.jumps_remaining.saturating_sub(1);
+                player.lost_jump_due_to_falling = true;
+            }
+        }
 
         // jump-buffering
         if jump_requested {
@@ -272,7 +298,9 @@ fn player_system(
         } else {
             player.frames_since_jump_input = player.frames_since_jump_input.saturating_add(1);
         }
-        let wants_to_jump = player.frames_since_jump_input <= player_params.jump_buffer_frames;
+
+        // manage jump cooldown (more important when double-jump is enabled)
+        player.frames_since_jumped = player.frames_since_jumped.saturating_add(1);
 
         // apply gravity
         if player.grounded {
@@ -282,10 +310,16 @@ fn player_system(
         }
 
         // jump
-        if can_jump && wants_to_jump && !player.has_jumped {
+        let wants_to_jump = player.frames_since_jump_input <= player_params.jump_buffer_frames;
+        let can_jump = player.jumps_remaining > 0
+            && player.frames_since_jumped > player_params.jump_cooldown_frames;
+
+        if wants_to_jump && can_jump {
             info!("jumping with coyote time {}", player.frames_since_grounded);
             player.current_fall_speed = player_params.jump_speed;
-            player.has_jumped = true;
+            player.jumps_remaining -= 1;
+            player.jumping = true;
+            player.frames_since_jumped = 0;
         }
 
         // finish velocity computation
@@ -294,11 +328,11 @@ fn player_system(
 
         // debug text for velocity
         status_text.0 = format!(
-            "vx: {}, vy: {}\ngrounded: {}\njumping: {}",
+            "vx: {}, vy: {}\ngrounded: {}\njumps: {}",
             player_velocity_per_sec.x,
             player_velocity_per_sec.y,
             player.grounded,
-            player.has_jumped
+            player.jumps_remaining,
         );
 
         // send computed translation to controller for resolution in the physics world
