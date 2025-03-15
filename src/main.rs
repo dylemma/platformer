@@ -188,7 +188,7 @@ fn setup_player(mut commands: Commands) {
             gravity: -10.0,
             coyote_time_frames: 6,
             jump_buffer_frames: 6,
-            max_jumps: 2,
+            max_jumps: 1, // can be set to 2, to allow double-jump
             jump_cooldown_frames: 8,
             // air_max_speed: 25.0,
             // air_acceleration: 5.0,
