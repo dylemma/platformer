@@ -144,6 +144,7 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 #[derive(Component)]
+#[require(PlayerControlState)]
 struct Player {
     max_run_speed: f32,
     run_acceleration: f32,
@@ -194,7 +195,6 @@ fn setup_player(mut commands: Commands) {
             // air_acceleration: 5.0,
             // air_deceleration:
         },
-        PlayerControlState::default(),
         Friction {
             coefficient: 0.0,
             combine_rule: CoefficientCombineRule::Multiply,
@@ -207,6 +207,7 @@ fn setup_player(mut commands: Commands) {
         KinematicCharacterControllerOutput::default(),
     ));
 
+    // Debug text for player state
     commands.spawn((
         PlayerStatusText,
         Text::new("hello world"),
