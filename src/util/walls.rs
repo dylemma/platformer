@@ -1,9 +1,9 @@
+use crate::util::{FrameCount, Side, SideMap};
 use bevy::color::Color;
 use bevy::math::Vec2;
-use bevy::prelude::{default, Entity, Gizmos};
+use bevy::prelude::{Entity, Gizmos, default};
 use bevy_rapier2d::pipeline::{QueryFilter, QueryFilterFlags};
 use bevy_rapier2d::plugin::RapierContext;
-use crate::util::{Side, SideMap};
 
 #[derive(Default)]
 pub struct WallGrabState {
@@ -16,7 +16,7 @@ pub struct WallGrabState {
 
 	/// Number of frames (capped at 255) since the player let go of the `latest_grabbed` wall.
 	/// This value should be ignored when `latest_grabbed` is `None`.
-	time_since_let_go: u8,
+	time_since_let_go: FrameCount,
 }
 
 impl WallGrabState {
@@ -26,26 +26,26 @@ impl WallGrabState {
 			None => {
 				if self.current_grabbed.is_some() {
 					// player just let go now
-					self.time_since_let_go = 0;
+					self.time_since_let_go = FrameCount(0);
 					self.latest_grabbed = self.current_grabbed;
 				} else {
 					// player had previously let go
-					self.time_since_let_go = self.time_since_let_go.saturating_add(1);
+					self.time_since_let_go.increment();
 				}
 				self.current_grabbed = None;
 			}
 			Some(side) => {
 				self.latest_grabbed = Some(side);
 				self.current_grabbed = Some(side);
-				self.time_since_let_go = 0;
+				self.time_since_let_go = FrameCount(0);
 			}
 		}
 	}
-	
+
 	/// Accessor for `latest_grabbed` that instead returns `None` if the grab
 	/// ended more than `coyote_time` frames ago.
-	pub fn latest_grabbed_within(&self, coyote_time: u8) -> Option<Side> {
-		if self.time_since_let_go <= coyote_time {
+	pub fn latest_grabbed_within(&self, duration: FrameCount) -> Option<Side> {
+		if self.time_since_let_go <= duration {
 			self.latest_grabbed
 		} else {
 			None
@@ -60,7 +60,7 @@ pub struct WallGrabSensor {
 	/// Ratio value between 0.0 and 1.0 representing how far from the bottom of the
 	/// player's collider this sensor exists
 	local_offset: f32,
-	
+
 	/// Tracks whether the ray-casts on each side of the player have hit something
 	pub hits: SideMap<bool>,
 }
@@ -74,11 +74,11 @@ impl WallGrabSensor {
 }
 
 /// A set of four `WallGrabSensor`s.
-/// 
+///
 /// As a collective, the sensors can be used not only to detect obstacles adjacent
 /// to the associated player entity, but also to distinguish wall-like obstacles
 /// from other things like ledges or steps.
-/// 
+///
 /// The `Default` instance will initialize the four sensors at local height offsets
 /// `[1/8, 3/8, 5/8, 7/8]`, i.e. equidistant to each other, with some space apart
 /// from the top and bottom of the collider.
@@ -101,7 +101,13 @@ impl WallGrabSensors {
 	/// Updates the `hits` state of each sensor in this group by performing ray-casts in the given
 	/// `rapier_context`, with edges of the rectangular "player" defined in terms of its `center`
 	/// and `half_extents` values.
-	pub fn update(&mut self, center: Vec2, half_extents: Vec2, rapier_context: &RapierContext, excluded_entity: Entity) {
+	pub fn update(
+		&mut self,
+		center: Vec2,
+		half_extents: Vec2,
+		rapier_context: &RapierContext,
+		excluded_entity: Entity,
+	) {
 		let bottom_y = center.y - half_extents.y;
 		let height = half_extents.y * 2.0;
 		for sensor in &mut self.0 {
@@ -177,15 +183,15 @@ impl WallGrabSensors {
 pub enum WallInterpretation {
 	/// Empty space, or a small obstacle that doesn't seem to be a wall
 	NotAWall,
-	
+
 	/// A small obstacle that only impedes the lower quarter of the player,
 	/// for example a stair that the player could step onto.
 	Step,
-	
+
 	/// A medium obstacle that only impedes the lower half of the player,
 	/// for example a ledge that the player could climb onto.
 	Ledge,
-	
+
 	/// A large obstacle that impedes most or all of the player,
 	/// which could be grabbed or climbed.
 	Wall,

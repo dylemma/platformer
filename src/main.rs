@@ -146,24 +146,23 @@ struct Player {
 	run_deceleration: f32,
 	jump_speed: f32,
 	gravity: f32,
-	coyote_time_frames: u32,
-	jump_buffer_frames: u32,
+	coyote_time: FrameCount,
+	jump_input_buffer: FrameCount,
 	max_jumps: u8,
-	jump_cooldown_frames: u8,
-	wall_release_jump_deadline_frames: u8,
+	jump_cooldown: FrameCount,
+	wall_release_jump_deadline: FrameCount,
 }
 
 #[derive(Component, Default)]
 struct PlayerControlState {
-	grounded: bool,
+	grounded: CapacitiveFlag,
 	jumping: bool,
 	lost_jump_due_to_falling: bool,
 	current_run_speed: f32,
 	current_fall_speed: f32, // TODO: naming is kinda backwards because positive means "going up"
-	frames_since_grounded: u32,
-	frames_since_jump_input: u32,
+	jump_requested: CapacitiveFlag,
 	jumps_remaining: u8,
-	frames_since_jumped: u8,
+	jump_cooldown: Cooldown,
 	wall_grab_sensors: WallGrabSensors,
 	wall_grab_state: WallGrabState,
 }
@@ -181,11 +180,11 @@ fn setup_player(mut commands: Commands) {
 			run_deceleration: 15.0,
 			jump_speed: 150.0,
 			gravity: -10.0,
-			coyote_time_frames: 6,
-			jump_buffer_frames: 6,
+			coyote_time: FrameCount(6),
+			jump_input_buffer: FrameCount(4),
 			max_jumps: 1, // can be set to 2, to allow double-jump
-			jump_cooldown_frames: 8,
-			wall_release_jump_deadline_frames: 10,
+			jump_cooldown: FrameCount(8),
+			wall_release_jump_deadline: FrameCount(10),
 		},
 		Friction {
 			coefficient: 0.0,
@@ -254,8 +253,6 @@ fn player_system(
 		v
 	};
 
-	let jump_requested = kb.just_pressed(KeyCode::Space);
-
 	for (
 		player_entity,
 		player_params,
@@ -266,6 +263,18 @@ fn player_system(
 		player_collider,
 	) in &mut player_query
 	{
+		// Check if the player wants to jump
+		let wants_to_jump = {
+			player.jump_requested.tick(kb.just_pressed(KeyCode::Space));
+			player.jump_requested.was_set_within(player_params.jump_input_buffer)
+		};
+
+		// manage jump cooldown (more important when double-jump is enabled)
+		player.jump_cooldown.tick();
+
+		// sync Rapier controller state back to player
+		player.grounded.tick(last_controller_out.grounded);
+
 		// if player ran into a platform, reset the portion of their velocity that caused that collision.
 		// e.g. bonk your head when you jump into the ceiling, or stop when you run into a wall
 		for collision in &last_controller_out.collisions {
@@ -317,43 +326,26 @@ fn player_system(
 			/* decel  */ player_params.run_deceleration,
 		);
 
-		// sync Rapier controller state back to player
-		player.grounded = last_controller_out.grounded;
-
 		// refund jump ability when reaching the ground
-		if player.grounded {
+		if player.grounded.is_set() {
 			player.jumps_remaining = player_params.max_jumps;
 			player.jumping = false;
 			player.lost_jump_due_to_falling = false;
-		}
-
-		// coyote timer
-		if player.grounded {
-			player.frames_since_grounded = 0;
-		} else {
-			player.frames_since_grounded = player.frames_since_grounded.saturating_add(1);
-		}
-
-		// if player walks off a platform without jumping, then they lose a jump
-		if player.frames_since_grounded > player_params.coyote_time_frames {
+		} else if !player.grounded.was_set_within(player_params.coyote_time) {
+			// If player walks off a platform without jumping, then they lose a jump.
+			// For a player with at most 1 jump, that just means they start falling normally.
+			// We use "Coyote Time" per Looney Tunes logic, so this doesn't happen until
+			// slightly after leaving the ground. The effect is a better feeling for the player,
+			// since they don't need to be "frame perfect" with their jump input while trying
+			// to wait until the last instant to jump.
 			if !player.lost_jump_due_to_falling && !player.jumping {
 				player.jumps_remaining = player.jumps_remaining.saturating_sub(1);
 				player.lost_jump_due_to_falling = true;
 			}
 		}
 
-		// jump-buffering
-		if jump_requested {
-			player.frames_since_jump_input = 0;
-		} else {
-			player.frames_since_jump_input = player.frames_since_jump_input.saturating_add(1);
-		}
-
-		// manage jump cooldown (more important when double-jump is enabled)
-		player.frames_since_jumped = player.frames_since_jumped.saturating_add(1);
-
 		// detect wall-grab
-		let currently_grabbed = if player.grounded {
+		let currently_grabbed = if player.grounded.is_set() {
 			None
 		} else {
 			// the player is grabbing a wall if their input is pointing in a nonzero horizontal direction,
@@ -377,7 +369,7 @@ fn player_system(
 		player.wall_grab_state.tick(currently_grabbed);
 
 		// apply gravity (when not already on the ground or stuck to a wall)
-		if player.grounded {
+		if player.grounded.is_set() {
 			player.current_fall_speed = 0.0;
 		} else if currently_grabbed.is_some() && player.current_fall_speed <= 0.0 {
 			// note the `<=` which seems redundant, because "why set it to 0 when it's already 0",
@@ -387,29 +379,25 @@ fn player_system(
 			player.current_fall_speed += player_params.gravity;
 		}
 
-		// normal jump
-		let wants_to_jump = player.frames_since_jump_input <= player_params.jump_buffer_frames;
-		let can_jump = player.jumps_remaining > 0 && player.frames_since_jumped > player_params.jump_cooldown_frames;
-		if wants_to_jump && can_jump {
-			debug!("jumping with coyote time {}", player.frames_since_grounded);
-			player.current_fall_speed = player_params.jump_speed;
-			player.jumps_remaining -= 1;
-			player.jumping = true;
-			player.frames_since_jumped = 0;
-		}
-
-		// wall jump
-		if let Some(side) = player
-			.wall_grab_state
-			.latest_grabbed_within(player_params.wall_release_jump_deadline_frames)
-		{
-			let can_wall_jump = player.frames_since_jumped > player_params.jump_cooldown_frames;
-			if wants_to_jump && can_wall_jump {
+		// jump
+		if wants_to_jump && player.jump_cooldown.is_ready() {
+			if let Some(side) = player
+				.wall_grab_state
+				.latest_grabbed_within(player_params.wall_release_jump_deadline)
+			{
+				// wall jump
 				debug!("wall jumping from {:?} wall!", side);
 				player.current_run_speed = player_params.max_run_speed * f32::consts::FRAC_1_SQRT_2 * -side;
 				player.current_fall_speed = player_params.jump_speed;
 				player.jumping = true;
-				player.frames_since_jumped = 0;
+				player.jump_cooldown.reset(player_params.jump_cooldown);
+			} else if player.jumps_remaining > 0 {
+				// normal jump
+				debug!("jumping with coyote time {:?}", player.grounded);
+				player.current_fall_speed = player_params.jump_speed;
+				player.jumps_remaining -= 1;
+				player.jumping = true;
+				player.jump_cooldown.reset(player_params.jump_cooldown);
 			}
 		}
 
@@ -419,7 +407,10 @@ fn player_system(
 		// debug text for velocity
 		status_text.0 = format!(
 			"vx: {}\nvy: {}\ngrounded: {}\njumps: {}",
-			player_velocity_per_sec.x, player_velocity_per_sec.y, player.grounded, player.jumps_remaining,
+			player_velocity_per_sec.x,
+			player_velocity_per_sec.y,
+			player.grounded.is_set(),
+			player.jumps_remaining,
 		);
 
 		// send computed translation to controller for resolution in the physics world
