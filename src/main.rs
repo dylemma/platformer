@@ -17,7 +17,6 @@ fn main() {
 		.add_systems(Startup, setup_player)
 		.add_systems(Startup, setup_platforms)
 		.add_systems(FixedUpdate, player_system)
-		// .add_systems(FixedUpdate, read_result_system.after(player_system))
 		//
 		// rapier physics
 		//
@@ -152,10 +151,6 @@ struct Player {
 	max_jumps: u8,
 	jump_cooldown_frames: u8,
 	wall_release_jump_deadline_frames: u8,
-	// air_max_speed: f32,
-	// air_acceleration: f32,
-	// air_deceleration: f32,
-	// current_air_speed: f32,
 }
 
 #[derive(Component, Default)]
@@ -190,9 +185,6 @@ fn setup_player(mut commands: Commands) {
 			jump_buffer_frames: 6,
 			max_jumps: 1, // can be set to 2, to allow double-jump
 			jump_cooldown_frames: 8,
-			// air_max_speed: 25.0,
-			// air_acceleration: 5.0,
-			// air_deceleration:
 			wall_release_jump_deadline_frames: 10,
 		},
 		Friction {
@@ -471,31 +463,3 @@ fn compute_run_velocity(current_vel: f32, desired_vel: f32, acceleration: f32, d
 		current_vel + accel_amount
 	}
 }
-
-// TODO: probably just delete this; it was an idea to provide a structure for things like
-//       jump cooldowns and coyote timers, but it's pretty half-baked
-// #[derive(Default)]
-// struct TimedFlag {
-// 	value: bool,
-// 	time_at_current_value: u32,
-// }
-// impl TimedFlag {
-// 	fn new(value: bool) -> Self {
-// 		Self {
-// 			value,
-// 			time_at_current_value: 0,
-// 		}
-// 	}
-// 	fn tick(&mut self) {
-// 		self.time_at_current_value += 1;
-// 	}
-// 	fn set(&mut self, value: bool) {
-// 		if value != self.value {
-// 			self.time_at_current_value = 0;
-// 		}
-// 		self.value = value;
-// 	}
-// 	fn has_been_true_at_most(&self, time: u32) -> bool {
-// 		self.value && self.time_at_current_value <= time
-// 	}
-// }
