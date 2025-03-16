@@ -25,7 +25,7 @@ fn main() {
 			substeps: 1,
 		})
 		.add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(10.0).in_fixed_schedule())
-		.add_plugins(RapierDebugRenderPlugin::default())
+		// .add_plugins(RapierDebugRenderPlugin::default())
 		.run();
 }
 
@@ -138,12 +138,18 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
 	));
 }
 
+#[derive(Copy, Clone, Debug)]
+struct HorizontalControlParams {
+	max_speed: f32,
+	acceleration: f32,
+	deceleration: f32,
+}
+
 #[derive(Component)]
 #[require(PlayerControlState)]
 struct Player {
-	max_run_speed: f32,
-	run_acceleration: f32,
-	run_deceleration: f32,
+	run: HorizontalControlParams,
+	float: HorizontalControlParams,
 	jump_speed: f32,
 	gravity: f32,
 	coyote_time: FrameCount,
@@ -173,11 +179,16 @@ struct PlayerStatusText;
 fn setup_player(mut commands: Commands) {
 	commands.spawn((
 		Player {
-			max_run_speed: 90.0,
-			// accelerate to max speed in a quarter second (15 frames)
-			run_acceleration: 6.0,
-			// decelerate from max speed to 0 in 1/10 second (6 frames)
-			run_deceleration: 15.0,
+			run: HorizontalControlParams {
+				max_speed: 90.0,
+				acceleration: 6.0,  // 15 frames (0.25s) to accelerate to max
+				deceleration: 15.0, // 6 frames (0.1s) to stop from max
+			},
+			float: HorizontalControlParams {
+				max_speed: 60.0,
+				acceleration: 3.0,  // 20 frames (0.33s) to accelerate to max
+				deceleration: 15.0, // 4 frames (0.066s) to stop from max (or 6 frames from max run speed)
+			},
 			jump_speed: 150.0,
 			gravity: -10.0,
 			coyote_time: FrameCount(6),
@@ -236,6 +247,7 @@ fn player_system(
 
 	let mut status_text = status_text_query.single_mut();
 
+	// TODO: maybe just replace this? Seems like we won't need a Vec2
 	let input_axis = {
 		let mut v = Vec2::new(0., 0.);
 		if kb.pressed(KeyCode::KeyA) {
@@ -251,6 +263,11 @@ fn player_system(
 			v.y -= 1.0;
 		}
 		v
+	};
+	let horizontal_input = match (kb.pressed(KeyCode::KeyA), kb.pressed(KeyCode::KeyD)) {
+		(true, false) => Some(Side::Left),
+		(false, true) => Some(Side::Right),
+		_ => None,
 	};
 
 	for (
@@ -318,12 +335,15 @@ fn player_system(
 			}
 		};
 
-		// update player's "run" based on horizontal inputs
-		player.current_run_speed = compute_run_velocity(
-			/* current */ player.current_run_speed,
-			/* desired */ input_axis.x * player_params.max_run_speed,
-			/* accel  */ player_params.run_acceleration,
-			/* decel  */ player_params.run_deceleration,
+		// update player's "run/float" based on horizontal inputs
+		player.current_run_speed = compute_player_self_velocity(
+			player.current_run_speed,
+			horizontal_input,
+			if player.grounded.is_set() {
+				player_params.run
+			} else {
+				player_params.float
+			},
 		);
 
 		// refund jump ability when reaching the ground
@@ -387,7 +407,7 @@ fn player_system(
 			{
 				// wall jump
 				debug!("wall jumping from {:?} wall!", side);
-				player.current_run_speed = player_params.max_run_speed * f32::consts::FRAC_1_SQRT_2 * -side;
+				player.current_run_speed = player_params.run.max_speed * f32::consts::FRAC_1_SQRT_2 * -side;
 				player.current_fall_speed = player_params.jump_speed;
 				player.jumping = true;
 				player.jump_cooldown.reset(player_params.jump_cooldown);
@@ -420,34 +440,49 @@ fn player_system(
 
 /// Solve for a player's new horizontal velocity, by accelerating or decelerating
 /// their current velocity towards their desired velocity
-fn compute_run_velocity(current_vel: f32, desired_vel: f32, acceleration: f32, deceleration: f32) -> f32 {
-	// The player will have a separate "speed up" and "slow down" rate;
-	// Pick the appropriate one based on the difference between current
-	// and desired velocities.
+fn compute_player_self_velocity(
+	current_vel: f32,
+	input_direction: Option<Side>,
+	HorizontalControlParams {
+		max_speed,
+		acceleration,
+		deceleration,
+	}: HorizontalControlParams,
+) -> f32 {
+	let target_vel = match input_direction {
+		None => 0.0,
+		Some(Side::Left) => -max_speed,
+		Some(Side::Right) => max_speed,
+	};
+
 	let accel_base = if current_vel == 0.0 {
 		// anything is faster than 0, regardless of direction
 		acceleration
-	} else if desired_vel == 0.0 {
+	} else if input_direction.is_none() {
 		// if the goal is to stop, that's always deceleration
 		deceleration
-	} else if desired_vel.signum() != current_vel.signum() {
+	} else if target_vel.signum() != current_vel.signum() {
 		// if the goal is in the opposite direction, decelerate to 0 first
 		deceleration
-	} else if desired_vel.abs() < current_vel.abs() {
-		// same direction but goal speed is slower; decelerate
-		deceleration
-	} else {
-		// gotta go fast!
+	} else if max_speed > current_vel.abs() {
+		// previous conditions ensure `target_vel` and `current_vel` have the same sign,
+		// so this means we need to speed up (in whichever direction) to reach max speed
 		acceleration
+	} else {
+		// player is already moving faster than `max_speed`, which could happen if they
+		// had previously accelerated in a different mode (e.g. running vs floating).
+		// Instead of decelerating down to the new max, the player can keep their "momentum",
+		// and we will neither accelerate nor decelerate
+		0.0
 	};
 
 	// What's the overall change in velocity the player wants to achieve?
-	let goal_delta = desired_vel - current_vel;
+	let goal_delta = target_vel - current_vel;
 
 	// If the acceleration is more than enough to reach the goal this frame,
 	// do so and skip some math
 	if goal_delta.abs() < accel_base {
-		desired_vel
+		target_vel
 	} else {
 		// Apply acceleration in the direction of the goal
 		let accel_amount = accel_base * goal_delta.signum();
