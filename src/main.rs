@@ -164,8 +164,7 @@ struct PlayerControlState {
 	grounded: CapacitiveFlag,
 	jumping: bool,
 	lost_jump_due_to_falling: bool,
-	current_run_speed: f32,
-	current_fall_speed: f32, // TODO: naming is kinda backwards because positive means "going up"
+	own_velocity: Vec2,
 	jump_requested: CapacitiveFlag,
 	jumps_remaining: u8,
 	jump_cooldown: Cooldown,
@@ -299,15 +298,14 @@ fn player_system(
 				if let Some(hit) = collision.hit.details {
 					let normal = hit.normal1;
 
-					let prev_player_vel = Vec2::new(player.current_run_speed, player.current_fall_speed);
+					let prev_player_vel = player.own_velocity;
 					let arrested_velocity = -prev_player_vel.dot(normal) * normal;
 
 					debug!(
 						"player hit platform with normal {:?} and should adjust velocity by {:?}",
 						normal, arrested_velocity
 					);
-					player.current_run_speed += arrested_velocity.x;
-					player.current_fall_speed += arrested_velocity.y;
+					player.own_velocity += arrested_velocity;
 
 					// TODO: if only a corner of the player actually clipped the wall/ceiling, push them around the corner
 				}
@@ -336,8 +334,8 @@ fn player_system(
 		};
 
 		// update player's "run/float" based on horizontal inputs
-		player.current_run_speed = compute_player_self_velocity(
-			player.current_run_speed,
+		player.own_velocity.x = compute_next_horizontal_velocity(
+			player.own_velocity.x,
 			horizontal_input,
 			if player.grounded.is_set() {
 				player_params.run
@@ -379,7 +377,7 @@ fn player_system(
 				match wall_sensor_state[side] {
 					WallInterpretation::Wall | WallInterpretation::Ledge => {
 						// could wall jump off this!
-						if player.current_fall_speed < 0.0 {}
+						if player.own_velocity.y < 0.0 {}
 						Some(side)
 					}
 					_ => None,
@@ -390,13 +388,13 @@ fn player_system(
 
 		// apply gravity (when not already on the ground or stuck to a wall)
 		if player.grounded.is_set() {
-			player.current_fall_speed = 0.0;
-		} else if currently_grabbed.is_some() && player.current_fall_speed <= 0.0 {
+			player.own_velocity.y = 0.0;
+		} else if currently_grabbed.is_some() && player.own_velocity.y <= 0.0 {
 			// note the `<=` which seems redundant, because "why set it to 0 when it's already 0",
 			// but it's important to prevent the `falling` case from triggering every other frame
-			player.current_fall_speed = 0.0;
+			player.own_velocity.y = 0.0;
 		} else {
-			player.current_fall_speed += player_params.gravity;
+			player.own_velocity.y += player_params.gravity;
 		}
 
 		// jump
@@ -407,14 +405,14 @@ fn player_system(
 			{
 				// wall jump
 				debug!("wall jumping from {:?} wall!", side);
-				player.current_run_speed = player_params.run.max_speed * f32::consts::FRAC_1_SQRT_2 * -side;
-				player.current_fall_speed = player_params.jump_speed;
+				player.own_velocity.x = player_params.run.max_speed * f32::consts::FRAC_1_SQRT_2 * -side;
+				player.own_velocity.y = player_params.jump_speed;
 				player.jumping = true;
 				player.jump_cooldown.reset(player_params.jump_cooldown);
 			} else if player.jumps_remaining > 0 {
 				// normal jump
 				debug!("jumping with coyote time {:?}", player.grounded);
-				player.current_fall_speed = player_params.jump_speed;
+				player.own_velocity.y = player_params.jump_speed;
 				player.jumps_remaining -= 1;
 				player.jumping = true;
 				player.jump_cooldown.reset(player_params.jump_cooldown);
@@ -422,7 +420,8 @@ fn player_system(
 		}
 
 		// finish velocity computation
-		let player_velocity_per_sec = Vec2::new(player.current_run_speed, player.current_fall_speed);
+		// TODO: eventually other factors will be added to this
+		let player_velocity_per_sec = player.own_velocity;
 
 		// debug text for velocity
 		status_text.0 = format!(
@@ -440,7 +439,7 @@ fn player_system(
 
 /// Solve for a player's new horizontal velocity, by accelerating or decelerating
 /// their current velocity towards their desired velocity
-fn compute_player_self_velocity(
+fn compute_next_horizontal_velocity(
 	current_vel: f32,
 	input_direction: Option<Side>,
 	HorizontalControlParams {
