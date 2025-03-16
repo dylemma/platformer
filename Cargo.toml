@@ -9,9 +9,6 @@ edition = "2024"
 [dependencies]
 # note: `dynamic_linking` feature is only for development; releases should omit this so the executable can be standalone
 bevy = { version = "0.15", features = ["dynamic_linking"] }
-ron = "0.8.1"
-thiserror = "2.0.12"
-serde = { version = "1.0.219", features = ["derive"] }
 bevy_rapier2d = { version = "0.29.0", features = ["debug-render-2d"] }
 
 # Enable max optimizations for dependencies, but not my code, per Bevy's advice

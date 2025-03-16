@@ -1,15 +1,10 @@
 mod util;
 
 use crate::util::*;
-use bevy::asset::io::Reader;
-use bevy::asset::{AssetLoader, LoadContext, LoadState};
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
 use bevy_rapier2d::prelude::*;
-use serde::Deserialize;
 use std::f32;
-use std::fmt::Debug;
-use thiserror::Error;
 
 fn main() {
 	App::new()
@@ -23,14 +18,6 @@ fn main() {
 		.add_systems(Startup, setup_platforms)
 		.add_systems(FixedUpdate, player_system)
 		// .add_systems(FixedUpdate, read_result_system.after(player_system))
-		//
-		// custom asset loader test
-		//
-		.init_asset::<MyCustomAsset>()
-		.init_asset_loader::<MyCustomAssetLoader>()
-		.add_systems(Startup, setup_assets)
-		.add_systems(Update, watch_assets)
-		.init_resource::<AssetLoadingState>()
 		//
 		// rapier physics
 		//
@@ -512,76 +499,3 @@ fn compute_run_velocity(current_vel: f32, desired_vel: f32, acceleration: f32, d
 // 		self.value && self.time_at_current_value <= time
 // 	}
 // }
-
-#[derive(Asset, TypePath, Deserialize, Debug)]
-struct MyCustomAsset {
-	#[allow(unused)]
-	name: String,
-}
-
-#[derive(Default)]
-struct MyCustomAssetLoader;
-
-#[derive(Debug, Error)]
-enum MyCustomAssetLoaderError {
-	#[error("Could not load file: {0}")]
-	Io(#[from] std::io::Error),
-
-	#[error("Could not parse RON: {0}")]
-	RonError(#[from] ron::error::SpannedError),
-}
-
-impl AssetLoader for MyCustomAssetLoader {
-	type Asset = MyCustomAsset;
-	type Settings = ();
-	type Error = MyCustomAssetLoaderError;
-
-	async fn load(
-		&self,
-		reader: &mut dyn Reader,
-		_: &Self::Settings,
-		_: &mut LoadContext<'_>,
-	) -> Result<Self::Asset, Self::Error> {
-		let mut bytes = Vec::new();
-		reader.read_to_end(&mut bytes).await?;
-		let custom_asset = ron::de::from_bytes::<MyCustomAsset>(&bytes)?;
-		Ok(custom_asset)
-	}
-}
-
-#[derive(Resource, Default)]
-struct AssetLoadingState {
-	example: Handle<MyCustomAsset>,
-	finished: bool,
-}
-
-fn setup_assets(mut state: ResMut<AssetLoadingState>, asset_server: Res<AssetServer>) {
-	// AssetPlugin uses "assets/" as the base path by default
-	state.example = asset_server.load::<MyCustomAsset>("example.ron");
-}
-
-fn watch_assets(
-	mut state: ResMut<AssetLoadingState>,
-	custom_assets: Res<Assets<MyCustomAsset>>,
-	srv: Res<AssetServer>,
-) {
-	let example = custom_assets.get(&state.example);
-	if !state.finished {
-		match example {
-			None => {
-				info!("still loading example");
-				match srv.load_state(&state.example) {
-					LoadState::Failed(err) => {
-						error!("Failed to  load example: {}", err);
-						state.finished = true;
-					}
-					_ => (),
-				}
-			}
-			Some(loaded) => {
-				info!("finished loading example: {:?}", loaded);
-				state.finished = true;
-			}
-		}
-	}
-}
