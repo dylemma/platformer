@@ -4,6 +4,9 @@ use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
 use bevy_rapier2d::prelude::*;
 use serde::Deserialize;
+use std::f32;
+use std::fmt::Debug;
+use std::ops::{Index, IndexMut, Mul, Neg};
 use thiserror::Error;
 
 fn main() {
@@ -91,8 +94,8 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
 	// platform 1
 	WallArgs {
 		color: Color::srgb(0.15, 0.8, 0.25),
-		pos: Vec2::new(75.0, 20.0),
-		size: Vec2::new(20.0, 2.0),
+		pos: Vec2::new(75.0, 18.0),
+		size: Vec2::new(20.0, 4.0),
 	}
 	.spawn(&mut commands);
 
@@ -159,6 +162,7 @@ struct Player {
 	jump_buffer_frames: u32,
 	max_jumps: u8,
 	jump_cooldown_frames: u8,
+	wall_release_jump_deadline_frames: u8,
 	// air_max_speed: f32,
 	// air_acceleration: f32,
 	// air_deceleration: f32,
@@ -176,6 +180,8 @@ struct PlayerControlState {
 	frames_since_jump_input: u32,
 	jumps_remaining: u8,
 	frames_since_jumped: u8,
+	wall_grab_sensors: WallGrabSensors,
+	wall_grab_state: WallGrabState,
 }
 
 #[derive(Component)]
@@ -198,13 +204,14 @@ fn setup_player(mut commands: Commands) {
 			// air_max_speed: 25.0,
 			// air_acceleration: 5.0,
 			// air_deceleration:
+			wall_release_jump_deadline_frames: 10,
 		},
 		Friction {
 			coefficient: 0.0,
 			combine_rule: CoefficientCombineRule::Multiply,
 		},
-		Sprite::from_color(Color::srgb(1., 0.5, 0.), Vec2::new(5.0, 5.0)),
-		Collider::cuboid(2.5, 2.5),
+		Sprite::from_color(Color::srgb(1., 0.5, 0.), Vec2::new(3.0, 5.0)),
+		Collider::cuboid(1.5, 2.5),
 		Transform::from_xyz(25., 25., 0.),
 		RigidBody::KinematicPositionBased,
 		KinematicCharacterController {
@@ -231,15 +238,22 @@ fn setup_player(mut commands: Commands) {
 fn player_system(
 	kb: Res<ButtonInput<KeyCode>>,
 	mut player_query: Query<(
+		Entity,
 		&Player,
 		&mut PlayerControlState,
 		&mut KinematicCharacterController,
 		&KinematicCharacterControllerOutput,
+		&Transform,
+		&Collider,
 	)>,
 	mut status_text_query: Query<&mut Text, With<PlayerStatusText>>,
 	obstacles: Query<(), With<Platform>>,
 	time: Res<Time>,
+	rapier_context: ReadRapierContext,
+	mut gizmos: Gizmos,
 ) {
+	let rapier_context = rapier_context.single();
+
 	let mut status_text = status_text_query.single_mut();
 
 	let input_axis = {
@@ -261,7 +275,16 @@ fn player_system(
 
 	let jump_requested = kb.just_pressed(KeyCode::Space);
 
-	for (player_params, mut player, mut controller, last_controller_out) in &mut player_query {
+	for (
+		player_entity,
+		player_params,
+		mut player,
+		mut controller,
+		last_controller_out,
+		player_transform,
+		player_collider,
+	) in &mut player_query
+	{
 		// if player ran into a platform, reset the portion of their velocity that caused that collision.
 		// e.g. bonk your head when you jump into the ceiling, or stop when you run into a wall
 		for collision in &last_controller_out.collisions {
@@ -272,7 +295,7 @@ fn player_system(
 					let prev_player_vel = Vec2::new(player.current_run_speed, player.current_fall_speed);
 					let arrested_velocity = -prev_player_vel.dot(normal) * normal;
 
-					info!(
+					debug!(
 						"player hit platform with normal {:?} and should adjust velocity by {:?}",
 						normal, arrested_velocity
 					);
@@ -284,6 +307,28 @@ fn player_system(
 			}
 		}
 
+		// update wall sensors
+		let wall_sensor_state = {
+			let player_center = player_transform.translation.truncate();
+			let player_half_extents = player_collider
+				.as_cuboid()
+				.unwrap_or_else(|| panic!("player collider isn't a cuboid"))
+				.half_extents();
+
+			player
+				.wall_grab_sensors
+				.update(player_center, player_half_extents, &rapier_context, player_entity);
+			player
+				.wall_grab_sensors
+				.draw(player_center, player_half_extents, &mut gizmos);
+
+			SideMap {
+				left: player.wall_grab_sensors.interpret(Side::Left),
+				right: player.wall_grab_sensors.interpret(Side::Right),
+			}
+		};
+
+		// update player's "run" based on horizontal inputs
 		player.current_run_speed = compute_run_velocity(
 			/* current */ player.current_run_speed,
 			/* desired */ input_axis.x * player_params.max_run_speed,
@@ -291,6 +336,7 @@ fn player_system(
 			/* decel  */ player_params.run_deceleration,
 		);
 
+		// sync Rapier controller state back to player
 		player.grounded = last_controller_out.grounded;
 
 		// refund jump ability when reaching the ground
@@ -325,23 +371,65 @@ fn player_system(
 		// manage jump cooldown (more important when double-jump is enabled)
 		player.frames_since_jumped = player.frames_since_jumped.saturating_add(1);
 
-		// apply gravity
+		// detect wall-grab
+		let currently_grabbed = if player.grounded {
+			None
+		} else {
+			// the player is grabbing a wall if their input is pointing in a nonzero horizontal direction,
+			// and the wall sensor thinks there's a wall or ledge in that direction
+			(match input_axis.x {
+				0.0 => None,
+				x if x.is_sign_negative() => Some(Side::Left),
+				_ => Some(Side::Right),
+			})
+			.and_then(|side| {
+				match wall_sensor_state[side] {
+					WallInterpretation::Wall | WallInterpretation::Ledge => {
+						// could wall jump off this!
+						if player.current_fall_speed < 0.0 {}
+						Some(side)
+					}
+					_ => None,
+				}
+			})
+		};
+		player.wall_grab_state.tick(currently_grabbed);
+
+		// apply gravity (when not already on the ground or stuck to a wall)
 		if player.grounded {
+			player.current_fall_speed = 0.0;
+		} else if currently_grabbed.is_some() && player.current_fall_speed <= 0.0 {
+			// note the `<=` which seems redundant, because "why set it to 0 when it's already 0",
+			// but it's important to prevent the `falling` case from triggering every other frame
 			player.current_fall_speed = 0.0;
 		} else {
 			player.current_fall_speed += player_params.gravity;
 		}
 
-		// jump
+		// normal jump
 		let wants_to_jump = player.frames_since_jump_input <= player_params.jump_buffer_frames;
 		let can_jump = player.jumps_remaining > 0 && player.frames_since_jumped > player_params.jump_cooldown_frames;
-
 		if wants_to_jump && can_jump {
-			info!("jumping with coyote time {}", player.frames_since_grounded);
+			debug!("jumping with coyote time {}", player.frames_since_grounded);
 			player.current_fall_speed = player_params.jump_speed;
 			player.jumps_remaining -= 1;
 			player.jumping = true;
 			player.frames_since_jumped = 0;
+		}
+
+		// wall jump
+		if let Some(side) = player
+			.wall_grab_state
+			.latest_grabbed_within(player_params.wall_release_jump_deadline_frames)
+		{
+			let can_wall_jump = player.frames_since_jumped > player_params.jump_cooldown_frames;
+			if wants_to_jump && can_wall_jump {
+				debug!("wall jumping from {:?} wall!", side);
+				player.current_run_speed = player_params.max_run_speed * f32::consts::FRAC_1_SQRT_2 * -side;
+				player.current_fall_speed = player_params.jump_speed;
+				player.jumping = true;
+				player.frames_since_jumped = 0;
+			}
 		}
 
 		// finish velocity computation
@@ -349,7 +437,7 @@ fn player_system(
 
 		// debug text for velocity
 		status_text.0 = format!(
-			"vx: {}, vy: {}\ngrounded: {}\njumps: {}",
+			"vx: {}\nvy: {}\ngrounded: {}\njumps: {}",
 			player_velocity_per_sec.x, player_velocity_per_sec.y, player.grounded, player.jumps_remaining,
 		);
 
@@ -392,6 +480,256 @@ fn compute_run_velocity(current_vel: f32, desired_vel: f32, acceleration: f32, d
 		// Apply acceleration in the direction of the goal
 		let accel_amount = accel_base * goal_delta.signum();
 		current_vel + accel_amount
+	}
+}
+
+// TODO: probably just delete this; it was an idea to provide a structure for things like
+//       jump cooldowns and coyote timers, but it's pretty half-baked
+// #[derive(Default)]
+// struct TimedFlag {
+// 	value: bool,
+// 	time_at_current_value: u32,
+// }
+// impl TimedFlag {
+// 	fn new(value: bool) -> Self {
+// 		Self {
+// 			value,
+// 			time_at_current_value: 0,
+// 		}
+// 	}
+// 	fn tick(&mut self) {
+// 		self.time_at_current_value += 1;
+// 	}
+// 	fn set(&mut self, value: bool) {
+// 		if value != self.value {
+// 			self.time_at_current_value = 0;
+// 		}
+// 		self.value = value;
+// 	}
+// 	fn has_been_true_at_most(&self, time: u32) -> bool {
+// 		self.value && self.time_at_current_value <= time
+// 	}
+// }
+
+#[derive(Default)]
+struct WallGrabState {
+	/// What the player is *currently* holding onto
+	current_grabbed: Option<Side>,
+
+	/// What the player *most recently* was holding onto.
+	/// When `current_grabbed` is `Some`, `latest_grabbed == current_grabbed`
+	latest_grabbed: Option<Side>,
+
+	/// Number of frames (capped at 255) since the player let go of the `latest_grabbed` wall.
+	/// This value should be ignored when `latest_grabbed` is `None`.
+	time_since_let_go: u8,
+}
+
+impl WallGrabState {
+	fn tick(&mut self, current_grabbed: Option<Side>) {
+		match current_grabbed {
+			None => {
+				if self.current_grabbed.is_some() {
+					// player just let go now
+					self.time_since_let_go = 0;
+					self.latest_grabbed = self.current_grabbed;
+				} else {
+					// player had previously let go
+					self.time_since_let_go = self.time_since_let_go.saturating_add(1);
+				}
+				self.current_grabbed = None;
+			}
+			Some(side) => {
+				self.latest_grabbed = Some(side);
+				self.current_grabbed = Some(side);
+				self.time_since_let_go = 0;
+			}
+		}
+	}
+	fn latest_grabbed_within(&self, coyote_time: u8) -> Option<Side> {
+		if self.time_since_let_go <= coyote_time {
+			self.latest_grabbed
+		} else {
+			None
+		}
+	}
+}
+
+#[derive(Default, Debug)]
+struct WallGrabSensor {
+	local_offset: f32,
+	hits: SideMap<bool>,
+}
+impl WallGrabSensor {
+	fn at_offset(local_offset: f32) -> Self {
+		Self {
+			local_offset,
+			hits: default(),
+		}
+	}
+}
+
+#[derive(Debug)]
+struct WallGrabSensors([WallGrabSensor; 4]);
+
+impl Default for WallGrabSensors {
+	fn default() -> Self {
+		let gap = 0.25;
+		let bottom_height = gap * 0.5;
+		WallGrabSensors([
+			WallGrabSensor::at_offset(bottom_height),
+			WallGrabSensor::at_offset(bottom_height + gap),
+			WallGrabSensor::at_offset(bottom_height + gap * 2.0),
+			WallGrabSensor::at_offset(bottom_height + gap * 3.0),
+		])
+	}
+}
+impl WallGrabSensors {
+	fn update(&mut self, center: Vec2, half_extents: Vec2, rapier_context: &RapierContext, excluded_entity: Entity) {
+		let bottom_y = center.y - half_extents.y;
+		let height = half_extents.y * 2.0;
+		for sensor in &mut self.0 {
+			let sensor_y = bottom_y + height * sensor.local_offset;
+
+			for side in Side::BOTH {
+				let x_offset = half_extents.x * side;
+				let direction = Vec2::X * side;
+				let raycast_start = Vec2::new(center.x + x_offset, sensor_y);
+				sensor.hits[side] = rapier_context
+					.cast_ray(
+						/* origin */ raycast_start,
+						/* ray_dir */ direction,
+						/* max_toi */ 1.0,
+						/* solid */ true, // IDK what this means
+						/* filter */
+						QueryFilter {
+							flags: QueryFilterFlags::EXCLUDE_DYNAMIC | QueryFilterFlags::EXCLUDE_SENSORS,
+							exclude_collider: Some(excluded_entity),
+							exclude_rigid_body: Some(excluded_entity),
+							..default()
+						},
+					)
+					.is_some();
+			}
+		}
+	}
+
+	fn draw(&mut self, center: Vec2, half_extents: Vec2, gizmos: &mut Gizmos) {
+		let bottom_y = center.y - half_extents.y;
+		let height = half_extents.y * 2.0;
+		for sensor in &self.0 {
+			let sensor_y = bottom_y + height * sensor.local_offset;
+			for side in Side::BOTH {
+				let x_offset = half_extents.x * side;
+				let direction = Vec2::X * side;
+				let raycast_start = Vec2::new(center.x + x_offset, sensor_y);
+				let color = if sensor.hits[side] {
+					Color::srgb(0.8, 0.5, 0.0)
+				} else {
+					Color::srgb(0., 0., 1.)
+				};
+				gizmos.ray_2d(raycast_start, direction, color);
+			}
+		}
+	}
+
+	fn interpret(&self, side: Side) -> WallInterpretation {
+		// make a 4-bit number to represent the wall sensors, where the least-significant bit
+		// represents the bottom sensor, and the bit is 1 when its respective sensor was "hit"
+		let mut hit_flags = 0u8;
+		for (i, hit) in self.0.iter().map(|s| s.hits[side]).enumerate() {
+			if hit {
+				hit_flags |= 1 << i;
+			}
+		}
+		match hit_flags {
+			0b0001 => WallInterpretation::Step,
+			0b0011 => WallInterpretation::Ledge,
+			0b0111 => WallInterpretation::Wall,
+			0b1111 => WallInterpretation::Wall,
+			0b1110 => WallInterpretation::Wall,
+			_ => WallInterpretation::NotAWall,
+		}
+	}
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+enum WallInterpretation {
+	NotAWall,
+	Step,
+	Ledge,
+	Wall,
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+enum Side {
+	Left,
+	Right,
+}
+
+impl Neg for Side {
+	type Output = Side;
+
+	fn neg(self) -> Self::Output {
+		match self {
+			Side::Left => Side::Right,
+			Side::Right => Side::Left,
+		}
+	}
+}
+
+impl Side {
+	const BOTH: [Side; 2] = [Side::Left, Side::Right];
+}
+
+macro_rules! impl_side_traits {
+	($T:ty, $one:expr) => {
+		impl From<Side> for $T {
+			fn from(side: Side) -> $T {
+				match side {
+					Side::Left => -$one,
+					Side::Right => $one,
+				}
+			}
+		}
+		impl Mul<Side> for $T {
+			type Output = Self;
+			fn mul(self, side: Side) -> Self::Output {
+				match side {
+					Side::Left => -self,
+					Side::Right => self,
+				}
+			}
+		}
+	};
+}
+impl_side_traits!(f32, 1.0);
+impl_side_traits!(f64, 1.0);
+impl_side_traits!(i8, 1);
+impl_side_traits!(Vec2, Vec2::X);
+
+#[derive(Default, Debug)]
+struct SideMap<A> {
+	left: A,
+	right: A,
+}
+
+impl<A> Index<Side> for SideMap<A> {
+	type Output = A;
+
+	fn index(&self, index: Side) -> &Self::Output {
+		match index {
+			Side::Left => &self.left,
+			Side::Right => &self.right,
+		}
+	}
+}
+impl<A> IndexMut<Side> for SideMap<A> {
+	fn index_mut(&mut self, index: Side) -> &mut Self::Output {
+		match index {
+			Side::Left => &mut self.left,
+			Side::Right => &mut self.right,
+		}
 	}
 }
 
