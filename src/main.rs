@@ -90,7 +90,28 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
 	// platform 2
 	WallArgs {
 		color: Color::srgb(0.15, 0.8, 0.25),
-		pos: Vec2::new(50.0, 35.0),
+		pos: Vec2::new(50.0, 30.0),
+		size: Vec2::new(20.0, 2.0),
+	}
+	.spawn(&mut commands);
+
+	WallArgs {
+		color: Color::srgb(0.15, 0.8, 0.25),
+		pos: Vec2::new(35.0, 50.0),
+		size: Vec2::new(2.0, 20.0),
+	}
+	.spawn(&mut commands);
+
+	WallArgs {
+		color: Color::srgb(0.15, 0.8, 0.25),
+		pos: Vec2::new(50.0, 58.0),
+		size: Vec2::new(2.0, 20.0),
+	}
+	.spawn(&mut commands);
+
+	WallArgs {
+		color: Color::srgb(0.15, 0.8, 0.25),
+		pos: Vec2::new(28.0, 68.0),
 		size: Vec2::new(20.0, 2.0),
 	}
 	.spawn(&mut commands);
@@ -156,20 +177,54 @@ struct Player {
 	jump_input_buffer: FrameCount,
 	max_jumps: u8,
 	jump_cooldown: FrameCount,
-	wall_release_jump_deadline: FrameCount,
+	wall_jump_force_decay: ForceDecayCurve,
+	wall_jump_input_cooldown: FrameCount,
+	wall_control_params: PlayerWallControlParams,
 }
 
 #[derive(Component, Default)]
 struct PlayerControlState {
+	/// tracks whether the player is on the ground, or how recently they were on the ground
 	grounded: CapacitiveFlag,
+
+	/// tracks whether the player is airborne as the result of a jump (as opposed to falling)
 	jumping: bool,
+
+	/// flag used to avoid decrementing `jumps_remaining` every frame while in midair
 	lost_jump_due_to_falling: bool,
+
+	/// Velocity derived from the directional inputs, and gravity.
+	/// Does not exclude "external forces" affecting the X direction, like
+	/// wall jumping or moving platforms
 	own_velocity: Vec2,
+
+	/// Input buffer for jumping
 	jump_requested: CapacitiveFlag,
+
+	/// Resource counter for the player's jumps. Decrements when jumping from the ground or falling
+	/// from a platform. Resets when landing on the ground
 	jumps_remaining: u8,
+
+	/// cooldown timer for jumping
 	jump_cooldown: Cooldown,
-	wall_grab_sensors: WallGrabSensors,
-	wall_grab_state: WallGrabState,
+
+	/// a sensor object used to detect walls, ledges, and steps adjacent to the player
+	wall_sensors: WallSensors,
+
+	/// a decaying force that is added when wall-jumping
+	wall_jump_force: TemporaryForce,
+
+	/// amount of time after wall jumping, where attempting to move back towards the wall will be ignored
+	wall_jump_input_cooldown: Cooldown,
+
+	/// tracks the side that the wall was on, when jumping from it
+	wall_jump_latest_side: Option<Side>,
+
+	/// state that becomes active when the player comes in contact with a wall while airborne
+	wall_control_state: PlayerWallControlState,
+
+	/// remembers the total computed velocity (per-second) from the previous update
+	previous_total_velocity: Vec2,
 }
 
 #[derive(Component)]
@@ -188,13 +243,24 @@ fn setup_player(mut commands: Commands) {
 				acceleration: 3.0,  // 20 frames (0.33s) to accelerate to max
 				deceleration: 15.0, // 4 frames (0.066s) to stop from max (or 6 frames from max run speed)
 			},
-			jump_speed: 150.0,
-			gravity: -10.0,
+			jump_speed: 120.0,
+			gravity: -8.0,
 			coyote_time: FrameCount(6),
 			jump_input_buffer: FrameCount(4),
 			max_jumps: 1, // can be set to 2, to allow double-jump
 			jump_cooldown: FrameCount(8),
-			wall_release_jump_deadline: FrameCount(10),
+			wall_jump_force_decay: ForceDecayCurve {
+				easing: EaseFunction::Linear,
+				duration: FrameCount(20),
+			},
+			wall_jump_input_cooldown: FrameCount(5),
+			wall_control_params: PlayerWallControlParams {
+				push_away_duration: FrameCount(20),
+				slide_max_speed: 20.0,
+				slide_acceleration: 0.5,
+				climb_max_speed: 10.0,
+				climb_acceleration: 2.0,
+			},
 		},
 		Friction {
 			coefficient: 0.0,
@@ -246,29 +312,6 @@ fn player_system(
 
 	let mut status_text = status_text_query.single_mut();
 
-	// TODO: maybe just replace this? Seems like we won't need a Vec2
-	let input_axis = {
-		let mut v = Vec2::new(0., 0.);
-		if kb.pressed(KeyCode::KeyA) {
-			v.x -= 1.0;
-		}
-		if kb.pressed(KeyCode::KeyD) {
-			v.x += 1.0;
-		}
-		if kb.pressed(KeyCode::KeyW) {
-			v.y += 1.0;
-		}
-		if kb.pressed(KeyCode::KeyS) {
-			v.y -= 1.0;
-		}
-		v
-	};
-	let horizontal_input = match (kb.pressed(KeyCode::KeyA), kb.pressed(KeyCode::KeyD)) {
-		(true, false) => Some(Side::Left),
-		(false, true) => Some(Side::Right),
-		_ => None,
-	};
-
 	for (
 		player_entity,
 		player_params,
@@ -290,6 +333,30 @@ fn player_system(
 
 		// sync Rapier controller state back to player
 		player.grounded.tick(last_controller_out.grounded);
+
+		// update timers related to wall-jumping
+		player.wall_jump_force.tick();
+		player.wall_jump_input_cooldown.tick();
+
+		// if the player wall-jumped the last several frames,
+		// stop them from trying to move back towards that wall
+		let horizontal_input = {
+			let desired = match (kb.pressed(KeyCode::KeyA), kb.pressed(KeyCode::KeyD)) {
+				(true, false) => Some(Side::Left),
+				(false, true) => Some(Side::Right),
+				_ => None,
+			};
+			if !player.wall_jump_input_cooldown.is_ready() && desired == player.wall_jump_latest_side {
+				None
+			} else {
+				desired
+			}
+		};
+		let vertical_input = match (kb.pressed(KeyCode::KeyW), kb.pressed(KeyCode::KeyS)) {
+			(true, false) => Some(YSide::Up),
+			(false, true) => Some(YSide::Down),
+			_ => None,
+		};
 
 		// if player ran into a platform, reset the portion of their velocity that caused that collision.
 		// e.g. bonk your head when you jump into the ceiling, or stop when you run into a wall
@@ -321,28 +388,17 @@ fn player_system(
 				.half_extents();
 
 			player
-				.wall_grab_sensors
+				.wall_sensors
 				.update(player_center, player_half_extents, &rapier_context, player_entity);
 			player
-				.wall_grab_sensors
+				.wall_sensors
 				.draw(player_center, player_half_extents, &mut gizmos);
 
 			SideMap {
-				left: player.wall_grab_sensors.interpret(Side::Left),
-				right: player.wall_grab_sensors.interpret(Side::Right),
+				left: player.wall_sensors.interpret(Side::Left),
+				right: player.wall_sensors.interpret(Side::Right),
 			}
 		};
-
-		// update player's "run/float" based on horizontal inputs
-		player.own_velocity.x = compute_next_horizontal_velocity(
-			player.own_velocity.x,
-			horizontal_input,
-			if player.grounded.is_set() {
-				player_params.run
-			} else {
-				player_params.float
-			},
-		);
 
 		// refund jump ability when reaching the ground
 		if player.grounded.is_set() {
@@ -362,53 +418,107 @@ fn player_system(
 			}
 		}
 
-		// detect wall-grab
-		let currently_grabbed = if player.grounded.is_set() {
-			None
-		} else {
-			// the player is grabbing a wall if their input is pointing in a nonzero horizontal direction,
-			// and the wall sensor thinks there's a wall or ledge in that direction
-			(match input_axis.x {
+		let player_wall_state = {
+			let is_airborne = !player.grounded.is_set();
+			let horizontal_momentum = match player.previous_total_velocity.x {
 				0.0 => None,
-				x if x.is_sign_negative() => Some(Side::Left),
-				_ => Some(Side::Right),
-			})
-			.and_then(|side| {
-				match wall_sensor_state[side] {
-					WallInterpretation::Wall | WallInterpretation::Ledge => {
-						// could wall jump off this!
-						if player.own_velocity.y < 0.0 {}
-						Some(side)
+				x => {
+					if x.is_sign_negative() {
+						Some(Side::Left)
+					} else {
+						Some(Side::Right)
 					}
-					_ => None,
 				}
-			})
+			};
+			player.wall_control_state.tick(
+				&wall_sensor_state,
+				is_airborne,
+				&player_params.wall_control_params,
+				horizontal_input,
+				horizontal_momentum,
+				vertical_input,
+			)
 		};
-		player.wall_grab_state.tick(currently_grabbed);
+
+		// update player's "run/float" based on horizontal inputs
+		player.own_velocity.x = {
+			let filtered_horizontal_input = if player_wall_state.is_some() {
+				None
+			} else {
+				horizontal_input
+			};
+			compute_next_horizontal_velocity(
+				player.own_velocity.x,
+				filtered_horizontal_input,
+				if player.grounded.is_set() {
+					player_params.run
+				} else {
+					player_params.float
+				},
+			)
+		};
 
 		// apply gravity (when not already on the ground or stuck to a wall)
 		if player.grounded.is_set() {
 			player.own_velocity.y = 0.0;
-		} else if currently_grabbed.is_some() && player.own_velocity.y <= 0.0 {
-			// note the `<=` which seems redundant, because "why set it to 0 when it's already 0",
-			// but it's important to prevent the `falling` case from triggering every other frame
-			player.own_velocity.y = 0.0;
+		} else if let Some(wall_state) = player_wall_state {
+			let vy = player.own_velocity.y;
+			match wall_state {
+				PlayerWallState::Grabbed(_) => {
+					// apply gravity to arrest upward momentum, but don't let the player slide down
+					player.own_velocity.y = (vy + player_params.gravity).max(0.0);
+				}
+				PlayerWallState::Sliding(_) => {
+					// apply normal gravity to arrest upward momentum,
+					// but downward force should be gentle
+					if vy >= -player_params.gravity {
+						player.own_velocity.y += player_params.gravity;
+					} else if vy > 0.0 {
+						player.own_velocity.y = 0.0
+					} else {
+						player.own_velocity.y = (vy - player_params.wall_control_params.slide_acceleration)
+							.max(-player_params.wall_control_params.slide_max_speed);
+					}
+				}
+				PlayerWallState::Climbing(_) => {
+					// let the player climb up the ledge
+					let climb_max = player_params.wall_control_params.climb_max_speed;
+					let climb_accel = player_params.wall_control_params.climb_acceleration;
+					if vy < climb_max {
+						// if they weren't moving upwards (fast), accelerate them upward
+						player.own_velocity.y = (vy + climb_accel).min(climb_max).max(0.0);
+					} else {
+						// if they are already moving upwards quickly, let gravity apply
+						// until they reach the normal climbing speed
+						player.own_velocity.y = (vy + player_params.gravity).min(climb_max);
+					}
+				}
+			}
 		} else {
+			// apply normal gravity
 			player.own_velocity.y += player_params.gravity;
 		}
 
 		// jump
 		if wants_to_jump && player.jump_cooldown.is_ready() {
-			if let Some(side) = player
-				.wall_grab_state
-				.latest_grabbed_within(player_params.wall_release_jump_deadline)
-			{
+			if let Some(wall_state) = player_wall_state.as_ref() {
 				// wall jump
-				debug!("wall jumping from {:?} wall!", side);
-				player.own_velocity.x = player_params.run.max_speed * f32::consts::FRAC_1_SQRT_2 * -side;
-				player.own_velocity.y = player_params.jump_speed;
+				debug!("wall jumping from {:?} wall!", wall_state.side());
+				// although effectively a vector, the X and Y components will be split;
+				// the Y trajectory will be applied normally, but the X trajectory
+				// will be applied as an "external force" so the player's run/float
+				// control logic doesn't completely overwrite the force too soon
+				let jump_vx = player_params.run.max_speed * f32::consts::FRAC_1_SQRT_2 * -wall_state.side();
+				let jump_vy = player_params.jump_speed * f32::consts::FRAC_1_SQRT_2;
+				player.wall_jump_force.reset(Vec2::new(jump_vx, 0.0));
+				player.own_velocity.y = jump_vy;
 				player.jumping = true;
 				player.jump_cooldown.reset(player_params.jump_cooldown);
+				player
+					.wall_jump_input_cooldown
+					.reset(player_params.wall_jump_input_cooldown);
+				player.wall_jump_latest_side = Some(wall_state.side());
+				player.wall_control_state.release();
 			} else if player.jumps_remaining > 0 {
 				// normal jump
 				debug!("jumping with coyote time {:?}", player.grounded);
@@ -420,17 +530,21 @@ fn player_system(
 		}
 
 		// finish velocity computation
-		// TODO: eventually other factors will be added to this
-		let player_velocity_per_sec = player.own_velocity;
+		let wall_jump_force = player.wall_jump_force.eval(&player_params.wall_jump_force_decay);
+		let player_velocity_per_sec = player.own_velocity + wall_jump_force;
+		player.previous_total_velocity = player_velocity_per_sec;
 
 		// debug text for velocity
 		status_text.0 = format!(
-			"vx: {}\nvy: {}\ngrounded: {}\njumps: {}",
+			"vx: {}\nvy: {}\ngrounded: {}\njumps: {}\nwalljump: {:?}\nwall_state: {:?}",
 			player_velocity_per_sec.x,
 			player_velocity_per_sec.y,
 			player.grounded.is_set(),
 			player.jumps_remaining,
+			wall_jump_force,
+			player_wall_state,
 		);
+
 
 		// send computed translation to controller for resolution in the physics world
 		controller.translation = Some(player_velocity_per_sec * time.delta_secs());
@@ -486,5 +600,39 @@ fn compute_next_horizontal_velocity(
 		// Apply acceleration in the direction of the goal
 		let accel_amount = accel_base * goal_delta.signum();
 		current_vel + accel_amount
+	}
+}
+
+struct ForceDecayCurve {
+	easing: EaseFunction,
+	duration: FrameCount,
+}
+
+#[derive(Default)]
+struct TemporaryForce {
+	age: FrameCount,
+	max: Vec2,
+}
+
+impl TemporaryForce {
+	fn eval(&self, curve: &ForceDecayCurve) -> Vec2 {
+		if self.age > curve.duration || curve.duration.0 == 0 {
+			// force expired, or the curve is undefined with 0 duration
+			Vec2::ZERO
+		} else {
+			// calculate the ratio of age/duration from 0 to 1,
+			// then use that as input the easing curve to get the
+			// current fraction of the `max` force
+			let t = self.age.0 as f32 / curve.duration.0 as f32;
+			let magnitude = EasingCurve::new(1.0, 0.0, curve.easing).sample_unchecked(t);
+			self.max * magnitude
+		}
+	}
+	fn tick(&mut self) {
+		self.age.increment();
+	}
+	fn reset(&mut self, max: Vec2) {
+		self.max = max;
+		self.age = FrameCount(0);
 	}
 }

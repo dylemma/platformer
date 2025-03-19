@@ -13,6 +13,11 @@ impl FrameCount {
 	pub fn decrement(&mut self) {
 		self.0 = self.0.saturating_sub(1);
 	}
+	
+	/// Clear the counter, setting is value to 0
+	pub fn reset(&mut self) {
+		self.0 = 0;
+	}
 }
 
 /// A cooldown timer.
