@@ -154,6 +154,9 @@ pub struct PlayerWallControlParams {
 	pub slide_acceleration: f32,
 	pub climb_max_speed: f32,
 	pub climb_acceleration: f32,
+
+	/// Length of ray-casts used to detect walls adjacent to the player
+	pub detection_length: f32,
 }
 
 /// Describes a sensor that exists at the sides of a player's collider,
@@ -208,6 +211,7 @@ impl WallSensors {
 		&mut self,
 		center: Vec2,
 		half_extents: Vec2,
+		ray_length: f32,
 		rapier_context: &RapierContext,
 		excluded_entity: Entity,
 	) {
@@ -224,7 +228,7 @@ impl WallSensors {
 					.cast_ray(
 						/* origin */ raycast_start,
 						/* ray_dir */ direction,
-						/* max_toi */ 1.0,
+						/* max_toi */ ray_length,
 						/* solid */ true, // IDK what this means
 						/* filter */
 						QueryFilter {
@@ -247,7 +251,7 @@ impl WallSensors {
 			let sensor_y = bottom_y + height * sensor.local_offset;
 			for side in Side::BOTH {
 				let x_offset = half_extents.x * side;
-				let direction = Vec2::X * side;
+				let direction = Vec2::X * side * 0.25;
 				let raycast_start = Vec2::new(center.x + x_offset, sensor_y);
 				let color = if sensor.hits[side] {
 					Color::srgb(0.8, 0.5, 0.0)

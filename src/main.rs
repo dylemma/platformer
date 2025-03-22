@@ -245,7 +245,7 @@ fn setup_player(mut commands: Commands) {
 			},
 			jump_speed: 120.0,
 			gravity: -8.0,
-			coyote_time: FrameCount(6),
+			coyote_time: FrameCount(4),
 			jump_input_buffer: FrameCount(4),
 			max_jumps: 1, // can be set to 2, to allow double-jump
 			jump_cooldown: FrameCount(8),
@@ -255,11 +255,12 @@ fn setup_player(mut commands: Commands) {
 			},
 			wall_jump_input_cooldown: FrameCount(5),
 			wall_control_params: PlayerWallControlParams {
-				push_away_duration: FrameCount(20),
+				push_away_duration: FrameCount(12),
 				slide_max_speed: 20.0,
 				slide_acceleration: 0.5,
 				climb_max_speed: 10.0,
 				climb_acceleration: 2.0,
+				detection_length: 0.25,
 			},
 		},
 		Friction {
@@ -387,9 +388,13 @@ fn player_system(
 				.unwrap_or_else(|| panic!("player collider isn't a cuboid"))
 				.half_extents();
 
-			player
-				.wall_sensors
-				.update(player_center, player_half_extents, &rapier_context, player_entity);
+			player.wall_sensors.update(
+				player_center,
+				player_half_extents,
+				player_params.wall_control_params.detection_length,
+				&rapier_context,
+				player_entity,
+			);
 			player
 				.wall_sensors
 				.draw(player_center, player_half_extents, &mut gizmos);
@@ -544,7 +549,6 @@ fn player_system(
 			wall_jump_force,
 			player_wall_state,
 		);
-
 
 		// send computed translation to controller for resolution in the physics world
 		controller.translation = Some(player_velocity_per_sec * time.delta_secs());
