@@ -4,6 +4,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_rapier2d::pipeline::{QueryFilter, QueryFilterFlags};
 use bevy_rapier2d::plugin::RapierContext;
+use serde::Deserialize;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum PlayerWallState {
@@ -146,6 +147,7 @@ impl PlayerWallControlState {
 	}
 }
 
+#[derive(Copy, Clone, Debug, Deserialize)]
 pub struct PlayerWallControlParams {
 	/// Duration that player needs to hold the directional input away from the wall
 	/// before they actually let go and start falling

@@ -1,0 +1,32 @@
+PlayerConfig(Player(
+    run: (
+        max_speed: 40.0,
+        acceleration: 2.6666667,
+        deceleration: 6.6666667,
+    ),
+    float: (
+        max_speed: 20.0,
+        acceleration: 1.0,
+        deceleration: 5.0,
+    ),
+    jump_speed: 60.0,
+    gravity: -4.0,
+    coyote_time: (4),
+    jump_input_buffer: (4),
+    max_jumps: 1,
+    jump_cooldown: (8),
+    wall_jump_force_decay: (
+        easing: Linear,
+        duration: (20),
+    ),
+    wall_jump_input_cooldown: (5),
+    wall_control_params: (
+        push_away_duration: (12),
+        slide_max_speed: 20.0,
+        slide_acceleration: 0.5,
+        climb_max_speed: 10.0,
+        climb_acceleration: 2.0,
+        detection_length: 0.25,
+    ),
+))
+

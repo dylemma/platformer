@@ -1,6 +1,8 @@
+use serde::Deserialize;
+
 /// Integer value representing a number of frames, or game "ticks".
 /// Can be used to represent a duration, or act as a timer that counts up or down.
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, Deserialize)]
 pub struct FrameCount(pub usize);
 
 impl FrameCount {

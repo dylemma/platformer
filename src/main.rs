@@ -1,16 +1,89 @@
 mod util;
 
 use crate::util::*;
+use bevy::asset::{AssetLoader, AssetServer, LoadContext};
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
 use bevy_rapier2d::prelude::*;
+use serde::Deserialize;
 use std::f32;
+use bevy::asset::io::Reader;
+use thiserror::Error;
+
+
+fn load_player_config(asset_server: Res<AssetServer>, mut commands: Commands) {
+	let handle: Handle<PlayerConfig> = asset_server.load("player.ron");
+	info!("Load started for player data: {:?}", handle);
+	commands.insert_resource(PlayerRes(handle));
+}
+
+fn watch_player_config(
+	mut events: EventReader<AssetEvent<PlayerConfig>>,
+	player_data: Res<Assets<PlayerConfig>>,
+	mut players: Query<&mut Player>,
+) {
+    for event in events.read() {
+		info!("player asset event: {:?}", event);
+        if let AssetEvent::Modified { id } = event {
+			info!("Asset modified: {:?}", id);
+			if let Some(pc) = player_data.get(*id) {
+				for mut player in &mut players {
+					info!("Applying player config data {:?}", pc.0);
+					*player = pc.0.clone();
+				}
+			}
+        }
+    }
+}
+
+#[derive(Asset, Deserialize, TypePath)]
+struct PlayerConfig(Player);
+
+#[derive(Resource)]
+struct PlayerRes(Handle<PlayerConfig>);
+
+#[derive(Default)]
+struct PlayerAssetLoader;
+
+#[derive(Debug, Error)]
+enum PlayerAssetLoaderError {
+	#[error("Could not load asset: {0}")]
+	Io(#[from] std::io::Error),
+
+	#[error("Could not parse RON: {0}")]
+	Ron(#[from] ron::de::SpannedError),
+}
+impl AssetLoader for PlayerAssetLoader {
+	type Asset = PlayerConfig;
+	type Settings = ();
+	type Error = PlayerAssetLoaderError;
+
+	async fn load(&self, reader: &mut dyn Reader, settings: &Self::Settings, load_context: &mut LoadContext<'_>) -> Result<Self::Asset, Self::Error> {
+		let mut bytes = Vec::new();
+		reader.read_to_end(&mut bytes).await?;
+		let player = ron::de::from_bytes::<PlayerConfig>(&bytes)?;
+		Ok(player)
+	}
+
+	fn extensions(&self) -> &[&str] {
+		&["ron"]
+	}
+}
+
 
 fn main() {
 	App::new()
 		// baseline bevy stuff
-		.add_plugins(DefaultPlugins)
+		.add_plugins(DefaultPlugins.set(AssetPlugin {
+			// opt in to hot reloading of assets
+			watch_for_changes_override: Some(true),
+			..default()
+		}))
+		.init_asset::<PlayerConfig>()
+		.init_asset_loader::<PlayerAssetLoader>()
 		.insert_resource(Time::<Fixed>::from_hz(60.))
+		.add_systems(Startup, load_player_config)
+		.add_systems(Update, watch_player_config)
 		//
 		// platformer learning zone
 		.add_systems(Startup, setup_camera)
@@ -159,14 +232,14 @@ fn setup_platforms(mut commands: Commands, asset_server: Res<AssetServer>) {
 	));
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Deserialize)]
 struct HorizontalControlParams {
 	max_speed: f32,
 	acceleration: f32,
 	deceleration: f32,
 }
 
-#[derive(Component)]
+#[derive(Copy, Clone, Component, Debug, Deserialize, TypePath)]
 #[require(PlayerControlState)]
 struct Player {
 	run: HorizontalControlParams,
@@ -231,20 +304,22 @@ struct PlayerControlState {
 struct PlayerStatusText;
 
 fn setup_player(mut commands: Commands) {
+	let player_speed = 40.0;
+	let player_float_speed = 20.0;
 	commands.spawn((
 		Player {
 			run: HorizontalControlParams {
-				max_speed: 90.0,
-				acceleration: 6.0,  // 15 frames (0.25s) to accelerate to max
-				deceleration: 15.0, // 6 frames (0.1s) to stop from max
+				max_speed: player_speed,
+				acceleration: player_speed / 15.0,  // 15 frames (0.25s) to accelerate to max
+				deceleration: player_speed / 6.0, // 6 frames (0.1s) to stop from max
 			},
 			float: HorizontalControlParams {
-				max_speed: 60.0,
-				acceleration: 3.0,  // 20 frames (0.33s) to accelerate to max
-				deceleration: 15.0, // 4 frames (0.066s) to stop from max (or 6 frames from max run speed)
+				max_speed: player_float_speed,
+				acceleration: player_float_speed / 20.0,  // 20 frames (0.33s) to accelerate to max
+				deceleration: player_float_speed / 4.0, // 4 frames (0.066s) to stop from max (or 6 frames from max run speed)
 			},
-			jump_speed: 120.0,
-			gravity: -8.0,
+			jump_speed: 60.0,
+			gravity: -4.0,
 			coyote_time: FrameCount(4),
 			jump_input_buffer: FrameCount(4),
 			max_jumps: 1, // can be set to 2, to allow double-jump
@@ -342,7 +417,7 @@ fn player_system(
 		// if the player wall-jumped the last several frames,
 		// stop them from trying to move back towards that wall
 		let horizontal_input = {
-			let desired = match (kb.pressed(KeyCode::KeyA), kb.pressed(KeyCode::KeyD)) {
+			let desired = match (kb.pressed(KeyCode::KeyA) || kb.pressed(KeyCode::ArrowLeft), kb.pressed(KeyCode::KeyD) || kb.pressed(KeyCode::ArrowRight)) {
 				(true, false) => Some(Side::Left),
 				(false, true) => Some(Side::Right),
 				_ => None,
@@ -607,6 +682,7 @@ fn compute_next_horizontal_velocity(
 	}
 }
 
+#[derive(Copy, Clone, Debug, Deserialize)]
 struct ForceDecayCurve {
 	easing: EaseFunction,
 	duration: FrameCount,
