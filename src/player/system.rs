@@ -279,7 +279,7 @@ pub fn player_system(
 
             // debug text for velocity
             status_text.0 = format!(
-                "vx: {}\nvy: {}\ngrounded: {}\njumps: {}\nwalljump: {:?}\nwall_state: {:?}",
+                "vx: {}\nvy: {}\ngrounded: {}\njumps: {}\nwall_jump: {:?}\nwall_state: {:?}",
                 player_velocity_per_sec.x,
                 player_velocity_per_sec.y,
                 player.grounded.is_set(),
