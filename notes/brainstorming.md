@@ -33,16 +33,6 @@ This idea seems exciting, but needs refinement and consideration of edge cases (
 This might also work for the "anti head-bonking" feature that Celeste has, where if you jump or dash upward into the corner of a platform,
 you automatically get pushed to the side and get to keep your momentum.
 
-# Movement Tuning
-
-The character feels too fast right now. 90 units per second feels uncontrollable,
-especially when transitioning from a wall/fall state to the ground; the player suddenly rockets off in a direction
-and I find myself sprinting off the platform I just landed on.
-Need to tone it down a lot, but then the jump/wall-jump trajectories feel weird too.
-It'll end up as a whole cascading set of re-tuning.
-Probably for the best; I ought to pick the height/length values for the player's jump,
-then do the math to figure out what run speed / gravity / jump power numbers result in those measurements.
-
 # Dash
 
 I want a dash power like in Celeste, where the player boosts a few units in the chosen direction.
