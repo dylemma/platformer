@@ -1,16 +1,20 @@
-PlayerConfig(Player(
+PlayerControlParams(
     run: (
         max_speed: 40.0,
-        acceleration: 2.6666667,
-        deceleration: 6.6666667,
+        acceleration: 5,
+        deceleration: 10,
     ),
     float: (
         max_speed: 20.0,
         acceleration: 1.0,
         deceleration: 5.0,
     ),
-    jump_speed: 60.0,
-    gravity: -4.0,
+
+    // target jump apex = 10.5 units
+    // target time-to-apex = 15 frames
+    jump_speed: 78.75,
+    gravity: -5.25,
+
     coyote_time: (4),
     jump_input_buffer: (4),
     max_jumps: 1,
@@ -28,5 +32,4 @@ PlayerConfig(Player(
         climb_acceleration: 2.0,
         detection_length: 0.25,
     ),
-))
-
+)
